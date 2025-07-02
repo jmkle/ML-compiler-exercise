@@ -1,5 +1,7 @@
-#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Conversion/TensorToLinalg/TensorToLinalgPass.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
@@ -12,20 +14,34 @@
 
 void linalgToLLVMPipelineBuilder(mlir::OpPassManager &manager) {
   manager.addPass(mlir::createCanonicalizerPass());
-  //mlir::bufferization::OneShotBufferizationOptions bufferizationOptions;
-  //bufferizationOptions.bufferizeFunctionBoundaries = true;
-  
+  manager.addPass(mlir::createConvertElementwiseToLinalgPass());
+  manager.addPass(mlir::createConvertTensorToLinalgPass());
+
+  // One-shot bufferize
+  mlir::bufferization::OneShotBufferizePassOptions bufferizationOptions;
+  bufferizationOptions.bufferizeFunctionBoundaries = true;
   manager.addPass(
-      mlir::bufferization::createOneShotBufferizePass());
-  //mlir::bufferization::BufferDeallocationPipelineOptions deallocationOptions;
-  //mlir::bufferization::buildBufferDeallocationPipeline(manager, deallocationOptions);
+      mlir::bufferization::createOneShotBufferizePass(bufferizationOptions));
+  mlir::bufferization::BufferDeallocationPipelineOptions deallocationOptions;
+  mlir::bufferization::buildBufferDeallocationPipeline(manager, deallocationOptions);
 
   manager.addPass(mlir::createConvertLinalgToLoopsPass());
 
-  manager.addPass(mlir::createCanonicalizerPass());
-
-  manager.addPass(mlir::createConvertFuncToLLVMPass());
+  // Needed to lower memref.subview
+  manager.addPass(mlir::memref::createExpandStridedMetadataPass());
+  
+  manager.addPass(mlir::createSCFToControlFlowPass());
+  manager.addPass(mlir::createConvertControlFlowToLLVMPass());
   manager.addPass(mlir::createArithToLLVMConversionPass());
+  manager.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+  manager.addPass(mlir::createReconcileUnrealizedCastsPass());
+  manager.addPass(mlir::createConvertFuncToLLVMPass());
+
+  // Cleanup
+  manager.addPass(mlir::createCanonicalizerPass());
+  manager.addPass(mlir::createSCCPPass());
+  manager.addPass(mlir::createCSEPass());
+  manager.addPass(mlir::createSymbolDCEPass());
 }
 
 int main(int argc, char **argv) {

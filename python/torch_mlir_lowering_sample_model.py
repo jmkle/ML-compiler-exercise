@@ -19,8 +19,12 @@ from torch_mlir.compiler_utils import (
 class MyModule(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.param = torch.nn.Parameter(torch.rand(3, 4))
+        # Can also try torch.manual_seed(0) and then use torch.rand(3, 4)
+        self.param = torch.nn.Parameter(torch.tensor([[1., 2., 3., 4.], [5., 6., 7., 8.], [9., 10., 11., 12.]]))
         self.linear = torch.nn.Linear(4, 5)
+        with torch.no_grad():
+            self.linear.weight.copy_(torch.tensor([[0., 0., 0., 0.], [5., 6., 7., 8.], [9., 10., 11., 12.], [9., 10., 11., 12.], [9., 10., 11., 12.]]))
+            self.linear.bias.copy_(torch.tensor([0., 0., 0., 0., 1.]))
 
     def forward(self, x):
         return self.linear(x + self.param).clamp(min=0.0, max=1.0)
@@ -31,6 +35,7 @@ def run(f):
     f()
     print()
 
+"""
 @run
 def lower_pytorch_to_torch_fx():
     from torch.fx import symbolic_trace
@@ -39,19 +44,20 @@ def lower_pytorch_to_torch_fx():
 
     # High-level intermediate representation (IR) - Graph representation
     print(symbolic_traced.graph)
-"""
+
 @run
 def lower_pytorch_to_raw_output():
     # Export model to torch-mlir
-    m = fx.export_and_import(MyModule(), torch.randn(3, 4), output_type=OutputType.LINALG_ON_TENSORS)
+    m = fx.export_and_import(MyModule(), torch.randn(3, 4), output_type=OutputType.RAW)
 
     # Model in torch dialect
     mlir_str = str(m)
     mlir_ir = mlir_str.split("{-#")[0].strip()
-    print(mlir_ir)
+    #print(mlir_ir)
 
-    #with open("test_module_raw_mlir.txt", "w") as f:
-    #    f.write(m)
+    with open("python/sample_model_raw.mlir", "w") as f:
+        f.write(mlir_ir)
+
 
 @run
 def lower_pytorch_to_torch_mlir():
@@ -61,21 +67,22 @@ def lower_pytorch_to_torch_mlir():
     # Model in torch dialect
     mlir_str = str(m)
     mlir_ir = mlir_str.split("{-#")[0].strip()
-    print(mlir_ir)
+    #print(mlir_ir)
 
-    #with open("test_module_torch_mlir.txt", "w") as f:
-    #    f.write(m)
+    with open("python/sample_model_torch.mlir", "w") as f:
+        f.write(mlir_ir)
 """
 
 @run
 def lower_pytorch_to_linalg_on_tensors():
     # Export model to torch-mlir
-    m = fx.export_and_import(MyModule(), torch.randn(3, 4), output_type=OutputType.LINALG_ON_TENSORS)
-
+    m = fx.export_and_import(MyModule(), torch.randn(3, 4), output_type=OutputType.LINALG_ON_TENSORS,
+                             func_name = "sample_model")
+    print(m)
     # Model in torch dialect
     mlir_str = str(m)
     mlir_ir = mlir_str.split("{-#")[0].strip()
-    print(mlir_ir)
+    #print(mlir_ir)
 
-    with open("test_module_linalg_mlir.mlir", "w") as f:
+    with open("python/sample_model_linalg.mlir", "w") as f:
         f.write(mlir_ir)
