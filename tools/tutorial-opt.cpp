@@ -1,5 +1,7 @@
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Conversion/TensorToLinalg/TensorToLinalgPass.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
@@ -30,9 +32,11 @@ void linalgToLLVMPipelineBuilder(mlir::OpPassManager &manager) {
   // Needed to lower memref.subview
   manager.addPass(mlir::memref::createExpandStridedMetadataPass());
   
+  manager.addPass(mlir::createLowerAffinePass());
   manager.addPass(mlir::createSCFToControlFlowPass());
   manager.addPass(mlir::createConvertControlFlowToLLVMPass());
   manager.addPass(mlir::createArithToLLVMConversionPass());
+  manager.addPass(mlir::createConvertMathToLLVMPass());
   manager.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
   manager.addPass(mlir::createReconcileUnrealizedCastsPass());
   manager.addPass(mlir::createConvertFuncToLLVMPass());

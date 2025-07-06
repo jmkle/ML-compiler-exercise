@@ -11,4 +11,6 @@ mlir-translate -mlir-to-llvmir $PWD/python/sample_model_llvm.mlir > $PWD/python/
 llc --filetype=obj $PWD/python/sample_model_llvm_ir.ll
 
 ###  Compile  ###
-gcc -c python/sample_model_main.cpp -o python/sample_model_main.o && gcc python/sample_model_main.o python/sample_model_llvm_ir.o -o python/a.out
+gcc -c python/cnn/cnn_model_main.cpp -o python/cnn/cnn_model_main.o && gcc python/cnn/cnn_model_main.o python/cnn/cnn_model_llvm_ir.o -o python/cnn/a.out -lm
+
+gcc -c python/mnist/mnist_model_main.cpp -o python/mnist/mnist_model_main.o && gcc python/mnist/mnist_model_main.o python/mnist/mnist_model_llvm_ir.o -o python/mnist/a.out
