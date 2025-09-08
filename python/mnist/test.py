@@ -51,5 +51,5 @@ def benchmark():
 
 
 if __name__ == "__main__":
-   #print_output()
-   benchmark()
+   print_output()
+   #benchmark()

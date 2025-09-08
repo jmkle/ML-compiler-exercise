@@ -7,10 +7,12 @@ run-job.sh
 # Nested build directory
 /build*
 
-/python/*.mlir
-/python/*.ll
+/python/*/*.mlir
+/python/*/*.ll
 /python/*/*.o
 /python/*/*.out
+/python/*/core.*
+/python/*/*.txt
 
 *mlir.txt
 

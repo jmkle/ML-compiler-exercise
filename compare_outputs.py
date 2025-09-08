@@ -1,3 +1,5 @@
+# Usage: python ../../compare_outputs.py cnn_c_out.txt cnn_py_out.txt
+
 # compare_outputs.py
 import sys
 import numpy as np

@@ -24,132 +24,159 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 
 using namespace mlir;
 
 namespace {
 
-// Custom conversion pattern for linalg.matmul to BLAS calls
-struct MatmulToBlasPattern : public ConversionPattern {
-  explicit MatmulToBlasPattern(MLIRContext *context)
-      : ConversionPattern(linalg::MatmulOp::getOperationName(), 1, context) {}
-
+// Pattern to convert Linalg Matmul Op to cBlas function call.
+struct MatmulOpToBlasLibraryCall : public ConversionPattern {
+  explicit MatmulOpToBlasLibraryCall(MLIRContext *context, TypeConverter &converter)
+      : ConversionPattern(converter, linalg::MatmulOp::getOperationName(), 1, context) {}
+  
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                                 ConversionPatternRewriter &rewriter) const override {
-    auto matmulOp = cast<linalg::MatmulOp>(op);
-    Location loc = matmulOp.getLoc();
-    
-    // Check if this is a 2D matmul on f32 memrefs
-    auto lhsType = cast<MemRefType>(matmulOp.getInputs()[0].getType()); // matmulOp.getInputs()[0].getType().dyn_cast<MemRefType>();
-    auto rhsType = cast<MemRefType>(matmulOp.getInputs()[1].getType()); // matmulOp.getInputs()[1].getType().dyn_cast<MemRefType>();
-    auto outputType = cast<MemRefType>(matmulOp.getInputs()[2].getType()); // matmulOp.getOutputs()[0].getType().dyn_cast<MemRefType>();
-    
-    if (!lhsType || !rhsType || !outputType ||
-        lhsType.getRank() != 2 || rhsType.getRank() != 2 || outputType.getRank() != 2 ||
-        !lhsType.getElementType().isF32()) {
-      return failure();
-    }
-    
-    // Get the operands after bufferization
-    Value lhs = operands[0];
-    Value rhs = operands[1]; 
-    Value output = operands[2];
-    
-    // Extract matrix dimensions
-    auto lhsShape = lhsType.getShape();
-    auto rhsShape = rhsType.getShape();
-    auto outputShape = outputType.getShape();
-    
-    // Create LLVM types
-    auto i32Type = IntegerType::get(rewriter.getContext(), 32);
-    auto f32Type = Float32Type::get(rewriter.getContext());
-    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    
-    // Get or create the cblas_sgemm function declaration
-    ModuleOp module = matmulOp->getParentOfType<ModuleOp>();
-    LLVM::LLVMFuncOp sgemmFunc = getOrCreateSgemmFunc(module, rewriter);
-    
-    // Create constants for cblas_sgemm parameters
-    Value order = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
-                                                    rewriter.getI32IntegerAttr(101)); // CblasRowMajor
-    Value transA = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
-                                                     rewriter.getI32IntegerAttr(111)); // CblasNoTrans
-    Value transB = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
-                                                     rewriter.getI32IntegerAttr(111)); // CblasNoTrans
-    
-    // Matrix dimensions - handle both static and dynamic shapes
-    Value M, N, K, ldA, ldB, ldC;
-    
-    if (lhsShape[0] != ShapedType::kDynamic) {
-      M = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
-                                            rewriter.getI32IntegerAttr(lhsShape[0]));
-    } else {
-      Value dimM = rewriter.create<memref::DimOp>(loc, lhs, 0);
-      M = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimM);
-    }
-    
-    if (rhsShape[1] != ShapedType::kDynamic) {
-      N = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
-                                            rewriter.getI32IntegerAttr(rhsShape[1]));
-    } else {
-      Value dimN = rewriter.create<memref::DimOp>(loc, rhs, 1);
-      N = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimN);
-    }
-    
-    if (lhsShape[1] != ShapedType::kDynamic) {
-      K = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
-                                            rewriter.getI32IntegerAttr(lhsShape[1]));
-      ldA = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
-                                              rewriter.getI32IntegerAttr(lhsShape[1]));
-    } else {
-      Value dimK = rewriter.create<memref::DimOp>(loc, lhs, 1);
-      K = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimK);
-      ldA = K;
-    }
-    
-    if (rhsShape[1] != ShapedType::kDynamic) {
-      ldB = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
+      auto matmulOp = cast<linalg::MatmulOp>(op);
+      Location loc = matmulOp.getLoc();
+      
+      // Debug: Print information about the operation
+      llvm::errs() << "Processing matmul with " << operands.size() << " operands\n";
+      llvm::errs() << "Number of inputs: " << matmulOp.getNumDpsInputs() << "\n";
+      llvm::errs() << "Number of outputs: " << matmulOp.getNumDpsInits() << "\n";
+      
+      // Get inputs and outputs using the proper accessors
+      auto inputs = matmulOp.getDpsInputs();
+      auto outputs = matmulOp.getDpsInits();
+      
+      if (inputs.size() != 2 || outputs.size() != 1) {
+        llvm::errs() << "Unexpected number of inputs/outputs\n";
+        return failure();
+      }
+      
+      // Get ORIGINAL operands (before conversion) to check types
+      Value originalLhs = inputs[0];
+      Value originalRhs = inputs[1];
+      Value originalOutput = outputs[0];
+      
+      // Check if this is a 2D matmul on f32 memrefs using ORIGINAL types
+      auto lhsType = dyn_cast<MemRefType>(originalLhs.getType());
+      auto rhsType = dyn_cast<MemRefType>(originalRhs.getType());
+      auto outputType = dyn_cast<MemRefType>(originalOutput.getType());
+      
+      llvm::errs() << "Original LHS type: " << lhsType << "\n";
+      llvm::errs() << "Original RHS type: " << rhsType << "\n";
+      llvm::errs() << "Original Output type: " << outputType << "\n";
+      
+      if (!lhsType || !rhsType || !outputType ||
+          lhsType.getRank() != 2 || rhsType.getRank() != 2 || outputType.getRank() != 2 ||
+          !lhsType.getElementType().isF32()) {
+        llvm::errs() << "Type check failed\n";
+        return failure();
+      }
+      
+      llvm::errs() << "Type check passed\n";
+      
+      // Now get the converted operands (these should be LLVM struct types)
+      Value lhs = operands[0];  // First input (converted)
+      Value rhs = operands[1];  // Second input (converted)
+      Value output = operands[2]; // Output (converted)
+      
+      llvm::errs() << "Converted LHS type: " << lhs.getType() << "\n";
+      llvm::errs() << "Converted RHS type: " << rhs.getType() << "\n";
+      llvm::errs() << "Converted Output type: " << output.getType() << "\n";
+      
+      // Extract matrix dimensions from ORIGINAL types
+      auto lhsShape = lhsType.getShape();
+      auto rhsShape = rhsType.getShape();
+      auto outputShape = outputType.getShape();
+      
+      // Create LLVM types
+      auto i32Type = IntegerType::get(rewriter.getContext(), 32);
+      auto f32Type = Float32Type::get(rewriter.getContext());
+      auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+      
+      // Get or create the cblas_sgemm function declaration
+      ModuleOp module = matmulOp->getParentOfType<ModuleOp>();
+      LLVM::LLVMFuncOp sgemmFunc = getOrCreateSgemmFunc(module, rewriter);
+      
+      // Create constants for cblas_sgemm parameters
+      Value order = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
+                                                      rewriter.getI32IntegerAttr(101)); // CblasRowMajor
+      Value transA = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
+                                                      rewriter.getI32IntegerAttr(111)); // CblasNoTrans
+      Value transB = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
+                                                      rewriter.getI32IntegerAttr(111)); // CblasNoTrans
+      
+      // Matrix dimensions - handle both static and dynamic shapes
+      Value M, N, K, ldA, ldB, ldC;
+      
+      if (lhsShape[0] != ShapedType::kDynamic) {
+        M = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
+                                              rewriter.getI32IntegerAttr(lhsShape[0]));
+      } else {
+        // Use original operand for dimension extraction, then convert to i32
+        Value dimM = rewriter.create<memref::DimOp>(loc, originalLhs, 0);
+        M = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimM);
+      }
+      
+      if (rhsShape[1] != ShapedType::kDynamic) {
+        N = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
                                               rewriter.getI32IntegerAttr(rhsShape[1]));
-    } else {
-      Value dimLdB = rewriter.create<memref::DimOp>(loc, rhs, 1);
-      ldB = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimLdB);
+      } else {
+        Value dimN = rewriter.create<memref::DimOp>(loc, originalRhs, 1);
+        N = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimN);
+      }
+      
+      if (lhsShape[1] != ShapedType::kDynamic) {
+        K = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
+                                              rewriter.getI32IntegerAttr(lhsShape[1]));
+        ldA = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
+                                                rewriter.getI32IntegerAttr(lhsShape[1]));
+      } else {
+        Value dimK = rewriter.create<memref::DimOp>(loc, originalLhs, 1);
+        K = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimK);
+        ldA = K;
+      }
+      
+      if (rhsShape[1] != ShapedType::kDynamic) {
+        ldB = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
+                                                rewriter.getI32IntegerAttr(rhsShape[1]));
+      } else {
+        Value dimLdB = rewriter.create<memref::DimOp>(loc, originalRhs, 1);
+        ldB = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimLdB);
+      }
+      
+      if (outputShape[1] != ShapedType::kDynamic) {
+        ldC = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
+                                                rewriter.getI32IntegerAttr(outputShape[1]));
+      } else {
+        Value dimLdC = rewriter.create<memref::DimOp>(loc, originalOutput, 1);
+        ldC = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimLdC);
+      }
+      
+      // Alpha and Beta scalars
+      Value alpha = rewriter.create<LLVM::ConstantOp>(loc, f32Type, 
+                                                      rewriter.getF32FloatAttr(1.0));
+      Value beta = rewriter.create<LLVM::ConstantOp>(loc, f32Type, 
+                                                    rewriter.getF32FloatAttr(0.0));
+      
+      // Extract pointers from memrefs using LLVM operations
+      Value lhsPtr = rewriter.create<LLVM::ExtractValueOp>(loc, lhs, ArrayRef<int64_t>{1});
+      Value rhsPtr = rewriter.create<LLVM::ExtractValueOp>(loc, rhs, ArrayRef<int64_t>{1});
+      Value outputPtr = rewriter.create<LLVM::ExtractValueOp>(loc, output, ArrayRef<int64_t>{1});
+      
+      // Create the function call
+      SmallVector<Value> args = {order, transA, transB, M, N, K, alpha, 
+                                lhsPtr, ldA, rhsPtr, ldB, beta, outputPtr, ldC};
+      
+      rewriter.create<LLVM::CallOp>(loc, sgemmFunc, args);
+      
+      // Erase the original matmul operation
+      rewriter.eraseOp(matmulOp);
+      
+      return success();
     }
-    
-    if (outputShape[1] != ShapedType::kDynamic) {
-      ldC = rewriter.create<LLVM::ConstantOp>(loc, i32Type, 
-                                              rewriter.getI32IntegerAttr(outputShape[1]));
-    } else {
-      Value dimLdC = rewriter.create<memref::DimOp>(loc, output, 1);
-      ldC = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimLdC);
-    }
-    
-    // Alpha and Beta scalars
-    Value alpha = rewriter.create<LLVM::ConstantOp>(loc, f32Type, 
-                                                    rewriter.getF32FloatAttr(1.0));
-    Value beta = rewriter.create<LLVM::ConstantOp>(loc, f32Type, 
-                                                   rewriter.getF32FloatAttr(0.0));
-    
-    // Extract pointers from memrefs
-    Value lhsPtr = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, lhs);
-    Value rhsPtr = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, rhs);
-    Value outputPtr = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, output);
-    
-    // Convert to LLVM pointers
-    lhsPtr = rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, lhsPtr);
-    rhsPtr = rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, rhsPtr);
-    outputPtr = rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, outputPtr);
-    
-    // Create the function call
-    SmallVector<Value> args = {order, transA, transB, M, N, K, alpha, 
-                               lhsPtr, ldA, rhsPtr, ldB, beta, outputPtr, ldC};
-    
-    rewriter.create<LLVM::CallOp>(loc, sgemmFunc, args);
-    
-    // Erase the original matmul operation
-    rewriter.eraseOp(matmulOp);
-    
-    return success();
-  }
 
 private:
   LLVM::LLVMFuncOp getOrCreateSgemmFunc(ModuleOp module, PatternRewriter &rewriter) const {
@@ -198,58 +225,62 @@ private:
 };
 
 // Custom pass to replace linalg.matmul with OpenBLAS calls
-struct LinalgToBlasPass : public PassWrapper<LinalgToBlasPass, OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LinalgToBlasPass)
+struct ConvertMatmulToBlasLibraryCallPass : public PassWrapper<ConvertMatmulToBlasLibraryCallPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertMatmulToBlasLibraryCallPass)
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<func::FuncDialect, memref::MemRefDialect, 
-                   LLVM::LLVMDialect, arith::ArithDialect>();
+    registry.insert<LLVM::LLVMDialect, func::FuncDialect, memref::MemRefDialect, arith::ArithDialect>();
   }
 
   void runOnOperation() override {
-    ModuleOp module = getOperation();
-    MLIRContext *context = &getContext();
+    auto &context = getContext();
+    ConversionTarget target(context);
+
+    Operation *op = getOperation();
+
+    llvm::errs() << "Running ConvertMatmulToBlasLibraryCallPass\n";
+
+    // Mark legal dialects
+    target.addLegalDialect<func::FuncDialect, LLVM::LLVMDialect, memref::MemRefDialect, arith::ArithDialect>();
     
-    // Set up type converter for partial LLVM conversion
-    LLVMTypeConverter typeConverter(context);
-    
-    RewritePatternSet patterns(context);
-    patterns.add<MatmulToBlasPattern>(context);
-    
-    ConversionTarget target(*context);
-    target.addLegalDialect<func::FuncDialect, memref::MemRefDialect, 
-                          arith::ArithDialect, LLVM::LLVMDialect>();
+    // Mark linalg.matmul as illegal - this forces the conversion
     target.addIllegalOp<linalg::MatmulOp>();
-    
-    if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
+
+    RewritePatternSet patterns(&context);
+    LLVMTypeConverter typeConverter(&context);
+    patterns.add<MatmulOpToBlasLibraryCall>(patterns.getContext(), typeConverter);
+
+    llvm::errs() << "About to apply conversion\n";
+    if (failed(applyPartialConversion(op, target, std::move(patterns)))) {
+      llvm::errs() << "Conversion failed\n";
       signalPassFailure();
+    } else {
+      llvm::errs() << "Conversion succeeded\n";
     }
+  }
+
+  StringRef getArgument() const final { return "convert-matmul-to-blas"; }
+
+  StringRef getDescription() const final {
+    return "Convert linalg.matmul operations to CBLAS function calls";
   }
 };
 
 } // namespace
 
 // Create the pass
-std::unique_ptr<Pass> createLinalgToBlasPass() {
-  return std::make_unique<LinalgToBlasPass>();
+std::unique_ptr<Pass> createConvertMatmulToBlasLibraryCallPass() {
+  return std::make_unique<ConvertMatmulToBlasLibraryCallPass>();
 }
 
-void linalgToLLVMPipelineBuilder(mlir::OpPassManager &manager) {
+void linalgToBufferizationPipelineBuilder(mlir::OpPassManager &manager) {
   manager.addPass(mlir::createCanonicalizerPass());
   manager.addPass(mlir::createConvertElementwiseToLinalgPass());
   manager.addPass(mlir::createConvertTensorToLinalgPass());
 
-  /* For BLAS
   // Linalg optimizations (but keep matmuls for BLAS replacement)
-  manager.addPass(mlir::createLinalgGeneralizeNamedOpsPass());
-  manager.addPass(mlir::createLinalgElementwiseOpFusionPass());
-
-  manager.addPass(mlir::createCanonicalizerPass());
-  //manager.addPass(mlir::createConvertElementwiseToLinalgPass());
-  //manager.addPass(mlir::createConvertTensorToLinalgPass());
-  manager.addPass(createLinalgToBlasPass());
-
-  */
+  //manager.addPass(mlir::createLinalgGeneralizeNamedOpsPass());
+  //manager.addPass(mlir::createLinalgElementwiseOpFusionPass());
 
   // One-shot bufferize
   mlir::bufferization::OneShotBufferizePassOptions bufferizationOptions;
@@ -258,26 +289,29 @@ void linalgToLLVMPipelineBuilder(mlir::OpPassManager &manager) {
       mlir::bufferization::createOneShotBufferizePass(bufferizationOptions));
   mlir::bufferization::BufferDeallocationPipelineOptions deallocationOptions;
   mlir::bufferization::buildBufferDeallocationPipeline(manager, deallocationOptions);
-  
-  /* For BLAS*/
-  // CRITICAL: Replace matmuls with BLAS calls AFTER bufferization
-  //manager.addPass(createLinalgToBlasPass());
+}
 
+void BufferizationToLLVMPipelineBuilder(mlir::OpPassManager &manager) {
+  // CRITICAL: Replace matmuls with BLAS calls AFTER bufferization but BEFORE other LLVM conversions
+  manager.addPass(createConvertMatmulToBlasLibraryCallPass());
+
+  // Convert remaining linalg ops to loops
   manager.addPass(mlir::createConvertLinalgToLoopsPass());
 
-  // Needed to lower memref.subview
+  // Standard LLVM lowering pipeline
   manager.addPass(mlir::memref::createExpandStridedMetadataPass());
-  
   manager.addPass(mlir::createLowerAffinePass());
   manager.addPass(mlir::affine::createLoopFusionPass());
   manager.addPass(mlir::affine::createAffineVectorize());
   manager.addPass(mlir::createSCFToControlFlowPass());
-  manager.addPass(mlir::createConvertControlFlowToLLVMPass());
+  
+  // Convert to LLVM - order matters here
   manager.addPass(mlir::createArithToLLVMConversionPass());
   manager.addPass(mlir::createConvertMathToLLVMPass());
+  manager.addPass(mlir::createConvertControlFlowToLLVMPass());
   manager.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
-  manager.addPass(mlir::createReconcileUnrealizedCastsPass());
   manager.addPass(mlir::createConvertFuncToLLVMPass());
+  manager.addPass(mlir::createReconcileUnrealizedCastsPass());
 
   // Cleanup
   manager.addPass(mlir::createCanonicalizerPass());
@@ -288,150 +322,19 @@ void linalgToLLVMPipelineBuilder(mlir::OpPassManager &manager) {
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
-  //registry.insert<mlir::tutorial::poly::PolyDialect>();
   mlir::registerAllDialects(registry);
   mlir::registerAllPasses();
 
-  // Dialect conversion passes
-  //mlir::tutorial::poly::registerPolyToStandardPasses();
+  mlir::PassRegistration<ConvertMatmulToBlasLibraryCallPass>();
 
-  mlir::PassPipelineRegistration<>("linalg-to-llvm",
-                             "Run passes to lower the linalg dialect to LLVM",
-                             linalgToLLVMPipelineBuilder);
+  mlir::PassPipelineRegistration<>("linalg-to-bufferization",
+                             "Run passes to lower the linalg dialect to bufferization",
+                             linalgToBufferizationPipelineBuilder);
+                      
+  mlir::PassPipelineRegistration<>("bufferization-to-llvm",
+                             "Run passes to lower bufferized code to LLVM",
+                             BufferizationToLLVMPipelineBuilder);
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Tutorial Pass Driver", registry));
 }
-/*
-#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
-#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
-#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
-#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
-#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
-#include "mlir/Conversion/TensorToLinalg/TensorToLinalgPass.h"
-#include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
-#include "mlir/Dialect/Affine/Passes.h"
-#include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
-#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
-#include "mlir/Dialect/Linalg/Passes.h"
-#include "mlir/Dialect/Vector/Transforms/Passes.h"
-#include "mlir/InitAllDialects.h"
-#include "mlir/InitAllPasses.h"
-#include "mlir/Pass/PassManager.h"
-#include "mlir/Pass/PassRegistry.h"
-#include "mlir/Tools/mlir-opt/MlirOptMain.h"
-#include "mlir/Transforms/Passes.h"
-
-void optimizedLinalgToLLVMPipelineBuilder(mlir::OpPassManager &manager) {
-  // Initial canonicalization
-  manager.addPass(mlir::createCanonicalizerPass());
-  manager.addPass(mlir::createConvertElementwiseToLinalgPass());
-  manager.addPass(mlir::createConvertTensorToLinalgPass());
-
-  // CRITICAL: Linalg-level optimizations BEFORE bufferization
-  manager.addPass(mlir::createLinalgGeneralizeNamedOpsPass());
-  
-  // Tiling for better cache locality and vectorization
-  // Adjust tile sizes based on your target architecture
-  manager.addPass(mlir::createForallToParallelLoopPass());
-  
-  // Fusion at Linalg level - crucial for CNN performance
-  manager.addPass(mlir::createLinalgFoldReshapeOpsByLinearizationPass());
-  manager.addPass(mlir::createLinalgElementwiseOpFusionPass());
-  
-  // More canonicalization after transformations
-  manager.addPass(mlir::createCanonicalizerPass());
-  manager.addPass(mlir::createCSEPass());
-
-  // Vectorization at Linalg level (much more effective than later)
-  manager.addPass(mlir::createLinalgVectorizePass());
-  
-  // Vector-level optimizations
-  manager.addPass(mlir::vector::createVectorTransferFullPartialRewritePass());
-  manager.addPass(mlir::vector::createVectorTransferDropUnitDimsPass());
-  manager.addPass(mlir::vector::createVectorTransferFlattenPass());
-  
-  // Bufferization
-  mlir::bufferization::OneShotBufferizePassOptions bufferizationOptions;
-  bufferizationOptions.bufferizeFunctionBoundaries = true;
-  bufferizationOptions.allowReturnAllocsFromLoops = true;
-  manager.addPass(
-      mlir::bufferization::createOneShotBufferizePass(bufferizationOptions));
-  
-  mlir::bufferization::BufferDeallocationPipelineOptions deallocationOptions;
-  mlir::bufferization::buildBufferDeallocationPipeline(manager, deallocationOptions);
-
-  // Post-bufferization vector optimizations
-  manager.addPass(mlir::vector::createVectorBufferizationPass());
-  manager.addPass(mlir::vector::createVectorTransferOptimizationPass());
-  manager.addPass(mlir::vector::createVectorContractLoweringPass());
-  manager.addPass(mlir::vector::createVectorMultiReductionLoweringPass());
-  manager.addPass(mlir::vector::createVectorTransferLoweringPass());
-  manager.addPass(mlir::vector::createVectorShapeCastLoweringPass());
-  
-  // Convert remaining Linalg ops to loops (only what's left after vectorization)
-  manager.addPass(mlir::createConvertLinalgToLoopsPass());
-
-  // Memref optimizations
-  manager.addPass(mlir::memref::createExpandStridedMetadataPass());
-  manager.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
-  
-  // Affine optimizations
-  manager.addPass(mlir::createLowerAffinePass());
-  manager.addPass(mlir::affine::createLoopFusionPass());
-  manager.addPass(mlir::affine::createAffineLoopInvariantCodeMotionPass());
-  manager.addPass(mlir::affine::createAffineScalarReplacementPass());
-  
-  // Final cleanup before LLVM lowering
-  manager.addPass(mlir::createCanonicalizerPass());
-  manager.addPass(mlir::createCSEPass());
-  
-  // Lower to LLVM
-  manager.addPass(mlir::createConvertVectorToLLVMPass());
-  manager.addPass(mlir::createSCFToControlFlowPass());
-  manager.addPass(mlir::createConvertControlFlowToLLVMPass());
-  manager.addPass(mlir::createArithToLLVMConversionPass());
-  manager.addPass(mlir::createConvertMathToLLVMPass());
-  manager.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
-  manager.addPass(mlir::createReconcileUnrealizedCastsPass());
-  manager.addPass(mlir::createConvertFuncToLLVMPass());
-
-  // Final cleanup
-  manager.addPass(mlir::createCanonicalizerPass());
-  manager.addPass(mlir::createSCCPPass());
-  manager.addPass(mlir::createCSEPass());
-  manager.addPass(mlir::createSymbolDCEPass());
-}
-
-// Alternative pipeline with explicit tiling configuration
-void tiledLinalgToLLVMPipelineBuilder(mlir::OpPassManager &manager) {
-  manager.addPass(mlir::createCanonicalizerPass());
-  manager.addPass(mlir::createConvertElementwiseToLinalgPass());
-  manager.addPass(mlir::createConvertTensorToLinalgPass());
-
-  // Explicit tiling with sizes optimized for CNN workloads
-  // You may need to adjust these based on your specific architecture
-  auto tilingOptions = mlir::linalg::LinalgTilingOptions();
-  tilingOptions.setTileSizes({32, 32, 8}); // Adjust for your conv sizes
-  manager.addPass(mlir::createLinalgTilePass(tilingOptions));
-  
-  // Continue with the rest of the optimized pipeline...
-  // (same as above from Linalg optimizations onward)
-}
-
-int main(int argc, char **argv) {
-  mlir::DialectRegistry registry;
-  mlir::registerAllDialects(registry);
-  mlir::registerAllPasses();
-
-  mlir::PassPipelineRegistration<>("optimized-linalg-to-llvm",
-                             "Optimized pipeline for CNN compilation",
-                             optimizedLinalgToLLVMPipelineBuilder);
-
-  mlir::PassPipelineRegistration<>("tiled-linalg-to-llvm",
-                             "Tiled pipeline for CNN compilation",
-                             tiledLinalgToLLVMPipelineBuilder);
-
-  return mlir::asMainReturnCode(
-      mlir::MlirOptMain(argc, argv, "Optimized CNN Pass Driver", registry));
-}*/
