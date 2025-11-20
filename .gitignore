@@ -1,5 +1,8 @@
+.vscode/
+
 # Python virtual environment
 dev/
+/gpu/
 
 # Job submission script
 run-job.sh
@@ -19,8 +22,9 @@ build*/
 core.*
 
 # Python subdir artifacts
-python/*/*.{mlir,ll,o,out,txt}
-python/*/core.*
+src/*/*.{mlir,ll,o,out,txt}
+src/*/core.*
+src/*/__pycache__/
 
 # MLIR text variants
 *mlir.txt
