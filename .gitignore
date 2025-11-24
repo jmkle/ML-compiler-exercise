@@ -3,6 +3,7 @@
 # Python virtual environment
 dev/
 /gpu/
+.venv_torch_mlir
 
 # Job submission script
 run-job.sh
