@@ -52,6 +52,8 @@ python3 -m venv .venv_torch_mlir
 source .venv_torch_mlir/bin/activate
 pip install --upgrade pip
 
+# Go to torch-mlir directory and install requirements
+cd externals/torch-mlir
 python -m pip install -r requirements.txt -r torchvision-requirements.txt
 ```
 

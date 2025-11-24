@@ -10,12 +10,12 @@ Initalize the submodules (torch-mlir, llvm-project)
 `git submodule update --init --recursive`
 
 Load PYTHON 3.12 before you start (or load by default in ~/zshrc)
-`module load PYTHON/3.12`
+`module load Python/3.12.3`
 
 Set-up a python virtual environment
 ```
-python3 -m venv venv_torch_mlir
-source venv_torch_mlir/bin/activate
+python3 -m venv .venv_torch_mlir
+source .venv_torch_mlir/bin/activate
 pip install --upgrade pip
 ```
 
@@ -82,7 +82,7 @@ Or use Ninja directly
 
 Tests: `ninja check-torch-mlir check-torch-mlir-python`
 
-In venv_torch_mlir/bin/activate add the following (adapt the path if necessary):
+In .venv_torch_mlir/bin/activate add the following (adapt the path if necessary):
 ```
 # Add torch-mlir-opt to PATH
 export PATH="/home/ab123456/ml-compiler-exercise/externals/torch-mlir/build/bin/:$PATH"
